@@ -10,16 +10,14 @@ import gc
 import atexit
 import traceback
 from flask import Flask, request, jsonify
-from flask_cors import CORS
 from torchvision import models
 from scipy.stats import entropy
 from scipy.signal import find_peaks
 from werkzeug.utils import secure_filename
 from huggingface_hub import hf_hub_download 
 
+# No CORS: only the video backend (app.py) calls this service, server to server.
 app = Flask(__name__)
-# Allow CORS for all origins
-CORS(app, resources={r"/*": {"origins": "*"}})
 
 # --- CONFIGURATION ---
 MODEL_PATH = "deepfake_model_resnet_lstm.pth"

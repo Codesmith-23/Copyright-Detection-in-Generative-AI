@@ -12,7 +12,6 @@ import pickle
 import base64
 
 from flask import Flask, request, jsonify
-from flask_cors import CORS
 
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 import tensorflow as tf
@@ -25,8 +24,8 @@ except ImportError:
     FACENET_AVAILABLE = False
     print("[WARNING] keras-facenet not installed. Install with: pip install keras-facenet")
 
+# No CORS: only the video backend (app.py) calls this service, server to server.
 app = Flask(__name__)
-CORS(app)
 
 # ==========================================
 # CONFIGURATION

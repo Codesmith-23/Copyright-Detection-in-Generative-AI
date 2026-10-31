@@ -4,6 +4,7 @@ os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 
 import uuid
+import secrets
 import sqlite3
 import cv2
 import numpy as np
@@ -30,10 +31,50 @@ from huggingface_hub import hf_hub_download
 
 
 app = Flask(__name__)
-CORS(app, resources={r"/*": {"origins": "*"}})
+
+# Only the frontend may call this API from a browser. Set FRONTEND_ORIGIN to a
+# comma-separated list to allow other addresses (e.g. a LAN IP or a domain).
+FRONTEND_ORIGINS = [
+    origin.strip()
+    for origin in os.environ.get(
+        "FRONTEND_ORIGIN", "http://localhost:3000,http://127.0.0.1:3000"
+    ).split(",")
+    if origin.strip()
+]
+CORS(app, resources={r"/*": {"origins": FRONTEND_ORIGINS}})
 
 # JWT Configuration
-app.config['SECRET_KEY'] = 'your-secret-key-change-in-production-2026'
+# The signing secret comes from the JWT_SECRET environment variable. If it is
+# not set, a random secret is generated on first start and kept in a local,
+# git-ignored file so issued tokens stay valid across restarts.
+JWT_SECRET_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".jwt_secret")
+MIN_JWT_SECRET_LENGTH = 32
+
+def load_jwt_secret():
+    secret = os.environ.get("JWT_SECRET", "").strip()
+    if secret:
+        if len(secret) < MIN_JWT_SECRET_LENGTH:
+            raise RuntimeError(
+                f"JWT_SECRET must be at least {MIN_JWT_SECRET_LENGTH} characters long"
+            )
+        return secret
+
+    if os.path.exists(JWT_SECRET_FILE):
+        with open(JWT_SECRET_FILE) as f:
+            secret = f.read().strip()
+        if len(secret) >= MIN_JWT_SECRET_LENGTH:
+            return secret
+        print(f"[AUTH] {JWT_SECRET_FILE} is too short, generating a new secret")
+
+    secret = secrets.token_hex(32)
+    # Owner read/write only.
+    fd = os.open(JWT_SECRET_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(secret)
+    print(f"[AUTH] Generated a new JWT secret in {JWT_SECRET_FILE}")
+    return secret
+
+app.config['SECRET_KEY'] = load_jwt_secret()
 app.config['JWT_EXPIRATION_HOURS'] = 24
 
 ALLOWED_AUDIO = {'.mp3', '.wav', '.flac', '.m4a'}
