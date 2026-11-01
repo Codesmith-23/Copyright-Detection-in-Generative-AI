@@ -248,6 +248,31 @@ def token_required(f):
 # --- AUDIO EXTRACTION HELPER ---
 # Runs in a background thread so the main frame loop and audio
 # extraction happen concurrently instead of sequentially.
+AUDIO_SERVICE_URL = "http://127.0.0.1:5001/predict_audio"
+USABLE_AUDIO_LABELS = ("real", "fake")
+
+
+def call_audio_service(audio_path):
+    """
+    Sends an audio file to the audio service. Never raises. If the service is
+    down or answers with an error, returns label "unavailable" so the caller
+    can tell "no verdict" apart from a real "real" verdict.
+    """
+    try:
+        with open(audio_path, "rb") as f:
+            resp = requests.post(AUDIO_SERVICE_URL, files={"file": f}, timeout=120)
+        if resp.status_code == 200:
+            data = resp.json()
+            if data.get("label") in USABLE_AUDIO_LABELS:
+                return data
+            print(f"[AUDIO] Unexpected label from audio service: {data.get('label')!r}")
+        else:
+            print(f"[AUDIO] Audio service returned {resp.status_code}: {resp.text[:200]}")
+    except Exception as e:
+        print(f"[AUDIO] Audio service call failed: {e}")
+    return {"label": "unavailable", "confidence": 0, "segments": []}
+
+
 def extract_and_analyse_audio(filepath, videos_dir):
     """
     Extracts audio from the video file and posts it to the audio
@@ -269,16 +294,11 @@ def extract_and_analyse_audio(filepath, videos_dir):
         del clip
         gc.collect()
 
-        with open(temp_audio_path, "rb") as f:
-            resp = requests.post(
-                "http://127.0.0.1:5001/predict_audio",
-                files={"file": f},
-                timeout=120
-            )
-            if resp.status_code == 200:
-                audio_data = resp.json()
+        audio_data = call_audio_service(temp_audio_path)
 
-    except Exception:
+    except Exception as e:
+        print(f"[AUDIO] Could not extract audio from video: {e}")
+        audio_data = {"label": "unavailable", "confidence": 0, "segments": []}
         if 'clip' in locals():
             try:
                 clip.close()
@@ -406,6 +426,8 @@ def predict_media():
         if ext not in ALLOWED_AUDIO and ext not in ALLOWED_VIDEO:
             allowed = ", ".join(sorted(ALLOWED_VIDEO | ALLOWED_AUDIO))
             return jsonify({"error": f"Unsupported file type '{ext or 'none'}'. Allowed: {allowed}"}), 415
+        if ext in ALLOWED_VIDEO and model is None:
+            return jsonify({"error": "Video analysis is unavailable: the video model is not loaded. Please try again later."}), 503
         user_id = request.current_user['user_id']
         analysisID = str(uuid.uuid4())
 
@@ -416,18 +438,10 @@ def predict_media():
 
         # --- A. AUDIO FILE ---
         if ext in ALLOWED_AUDIO:
-            audio_data = {"label": "Error", "confidence": 0, "segments": []}
-            try:
-                with open(filepath, "rb") as f:
-                    resp = requests.post(
-                        "http://127.0.0.1:5001/predict_audio",
-                        files={"file": f},
-                        timeout=120
-                    )
-                    if resp.status_code == 200:
-                        audio_data = resp.json()
-            except Exception:
-                pass
+            audio_data = call_audio_service(filepath)
+            if audio_data["label"] not in USABLE_AUDIO_LABELS:
+                # No verdict, so nothing is saved to history.
+                return jsonify({"error": "Audio analysis is unavailable right now. Please try again later."}), 503
 
             result = "deepfake" if audio_data['label'] == 'fake' else "authentic"
             confidence = audio_data.get('confidence', 0)
@@ -470,6 +484,8 @@ def predict_media():
             sample_interval = max(1, int(frameRate * 3))
             max_frames_to_process = 50
             frames_processed = 0
+            faces_attempted = 0
+            face_errors = 0
 
             while cap.isOpened():
                 frameId = cap.get(1)
@@ -494,6 +510,7 @@ def predict_media():
                     if x2 - x1 < 10 or y2 - y1 < 10:
                         continue
 
+                    faces_attempted += 1
                     try:
                         crop = cv2.resize(frame[y1:y2, x1:x2], (299, 299)) / 255.0
                         pred = model.predict(crop.reshape(1, 299, 299, 3), verbose=0)[0][0]
@@ -548,7 +565,9 @@ def predict_media():
                                 _, buffer = cv2.imencode('.jpg', frame)
                                 first_fake_frame_b64 = base64.b64encode(buffer).decode('utf-8')
 
-                    except Exception:
+                    except Exception as e:
+                        face_errors += 1
+                        print(f"[VIDEO] Face analysis failed in frame {int(frameId)}: {e}")
                         continue
 
             cap.release()
@@ -563,16 +582,32 @@ def predict_media():
             audio_data, temp_extracted_audio = audio_future.result()
             audio_executor.shutdown(wait=False)
 
-            # Fusion Logic
-            avg_prob = np.mean(fake_probs) if fake_probs else 1.0
-            video_result = "deepfake" if avg_prob <= 0.5 else "authentic"
-            video_conf = round(
-                (sum(p <= 0.5 for p in fake_probs) / len(fake_probs) * 100), 2
-            ) if fake_probs else 0
+            audio_usable = audio_data.get('label') in USABLE_AUDIO_LABELS
 
-            final_result = video_result
-            final_conf = video_conf
-            if audio_data.get('label') == 'fake':
+            # Faces were found but every one of them failed: no verdict.
+            if faces_attempted > 0 and not fake_probs:
+                print(f"[VIDEO] All {face_errors} face analyses failed; returning no verdict.")
+                return jsonify({"error": "Video analysis failed for every detected face. Please try again."}), 500
+
+            # Fusion Logic
+            if fake_probs:
+                avg_prob = np.mean(fake_probs)
+                video_result = "deepfake" if avg_prob <= 0.5 else "authentic"
+                video_conf = round(sum(p <= 0.5 for p in fake_probs) / len(fake_probs) * 100, 2)
+            elif audio_usable:
+                # No faces: the verdict comes from the audio alone.
+                video_result = "no_faces"
+                video_conf = 0
+            else:
+                return jsonify({"error": "No verdict possible: no faces were found and no usable audio track."}), 422
+
+            if video_result == "no_faces":
+                final_result = "deepfake" if audio_data['label'] == 'fake' else "authentic"
+                final_conf = audio_data.get('confidence', 0)
+            else:
+                final_result = video_result
+                final_conf = video_conf
+            if video_result != "no_faces" and audio_data.get('label') == 'fake':
                 final_result = "deepfake"
                 final_conf = (
                     audio_data['confidence']
