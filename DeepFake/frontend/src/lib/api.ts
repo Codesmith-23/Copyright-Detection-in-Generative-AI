@@ -9,6 +9,7 @@ import {
   VerifyResponse,
   SupportFormData,
 } from "@/types";
+import { authService } from "@/lib/auth";
 
 // Force IPv4 to prevent 'ECONNREFUSED' errors on Windows
 const API_BASE_URL = "http://127.0.0.1:5000";
@@ -33,17 +34,42 @@ api.interceptors.request.use(
   (error) => Promise.reject(error),
 );
 
+// Login and register answer 401 for a wrong password. That is not an expired
+// session, so those calls keep their own error message and never redirect.
+const AUTH_FORM_PATHS = ["/auth/login", "/auth/register"];
+
 // Response Interceptor (Auth Error Handling)
 api.interceptors.response.use(
   (response) => response,
   (error) => {
-    if (error.response?.status === 401) {
-      localStorage.removeItem("auth_token");
-      window.location.href = "/";
+    const url: string = error.config?.url || "";
+    const isAuthForm = AUTH_FORM_PATHS.some((path) => url.startsWith(path));
+    if (error.response?.status === 401 && !isAuthForm) {
+      // Session expired or invalid: clear token and user, then go to login.
+      authService.logout();
+      if (window.location.pathname !== "/login") {
+        window.location.href = "/login";
+      }
     }
     return Promise.reject(error);
   },
 );
+
+// Turns an API failure into a message for the user. The backend sends
+// {"error": "text"}; older code expected {"error": {"message": "text"}}.
+export function errorMessage(error: any, fallback: string): string {
+  if (axios.isAxiosError(error) && !error.response) {
+    return error.code === "ECONNABORTED"
+      ? "The server took too long to respond. Please try again."
+      : "Cannot reach the server. Check that the backend is running.";
+  }
+  const apiError = error?.response?.data?.error as string | ApiError | undefined;
+  if (typeof apiError === "string" && apiError) return apiError;
+  if (apiError && typeof apiError === "object" && apiError.message) {
+    return apiError.message;
+  }
+  return fallback;
+}
 
 export const apiService = {
   // --- ANALYZE MEDIA (Video or Audio) ---
@@ -89,9 +115,7 @@ export const apiService = {
       // ✅ FIX 2: Return data directly
       return response.data;
     } catch (error: any) {
-      // Safe Error Casting
-      const apiError = error.response?.data?.error as ApiError | undefined;
-      throw new Error(apiError?.message || error.message || "Analysis failed");
+      throw new Error(errorMessage(error, "Analysis failed"));
     }
   },
 
@@ -102,8 +126,7 @@ export const apiService = {
       const response = await api.post<HistoryEntry[]>("/history", {});
       return response.data;
     } catch (error: any) {
-      const apiError = error.response?.data?.error as ApiError | undefined;
-      throw new Error(apiError?.message || "Failed to fetch history");
+      throw new Error(errorMessage(error, "Failed to fetch history"));
     }
   },
 
@@ -113,8 +136,7 @@ export const apiService = {
     try {
       await api.delete(`/history/delete/${resultId}`);
     } catch (error: any) {
-      const apiError = error.response?.data?.error as ApiError | undefined;
-      throw new Error(apiError?.message || "Failed to delete history entry");
+      throw new Error(errorMessage(error, "Failed to delete history entry"));
     }
   },
 
@@ -136,15 +158,7 @@ export const apiService = {
       );
       return response.data;
     } catch (error: any) {
-      const apiError = error.response?.data?.error as
-        | string
-        | ApiError
-        | undefined;
-      const message =
-        typeof apiError === "string"
-          ? apiError
-          : apiError?.message || "Registration failed";
-      throw new Error(message);
+      throw new Error(errorMessage(error, "Registration failed"));
     }
   },
 
@@ -153,15 +167,7 @@ export const apiService = {
       const response = await api.post<AuthResponse>("/auth/login", credentials);
       return response.data;
     } catch (error: any) {
-      const apiError = error.response?.data?.error as
-        | string
-        | ApiError
-        | undefined;
-      const message =
-        typeof apiError === "string"
-          ? apiError
-          : apiError?.message || "Login failed";
-      throw new Error(message);
+      throw new Error(errorMessage(error, "Login failed"));
     }
   },
 
@@ -179,15 +185,7 @@ async submitSupportForm(formData: SupportFormData): Promise<void> {
       const response = await api.get<VerifyResponse>("/auth/verify");
       return response.data;
     } catch (error: any) {
-      const apiError = error.response?.data?.error as
-        | string
-        | ApiError
-        | undefined;
-      const message =
-        typeof apiError === "string"
-          ? apiError
-          : apiError?.message || "Token verification failed";
-      throw new Error(message);
+      throw new Error(errorMessage(error, "Token verification failed"));
     }
   },
 };
