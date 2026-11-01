@@ -83,7 +83,7 @@ def load_service(tmp_path, monkeypatch):
     counter = {"n": 0}
 
     def load(rel_path, env=None):
-        settings = {"JWT_SECRET": TEST_JWT_SECRET, "FRONTEND_ORIGIN": None}
+        settings = {"JWT_SECRET": TEST_JWT_SECRET, "FRONTEND_ORIGIN": None, "MAX_UPLOAD_MB": None}
         settings.update(env or {})
         for key, value in settings.items():
             if value is None:

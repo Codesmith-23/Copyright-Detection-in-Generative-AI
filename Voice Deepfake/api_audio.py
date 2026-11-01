@@ -14,6 +14,7 @@ from torchvision import models
 from scipy.stats import entropy
 from scipy.signal import find_peaks
 from werkzeug.utils import secure_filename
+from werkzeug.exceptions import RequestEntityTooLarge
 from huggingface_hub import hf_hub_download 
 
 # No CORS: only the video backend (app.py) calls this service, server to server.
@@ -29,6 +30,17 @@ OVERLAP = 2.0
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 AUDIO_UPLOAD_FOLDER = os.path.join(BASE_DIR, "audio_uploads")
 os.makedirs(AUDIO_UPLOAD_FOLDER, exist_ok=True)
+
+ALLOWED_AUDIO = {'.mp3', '.wav', '.flac', '.m4a'}
+
+# Largest accepted upload, in MB (same default as the video backend).
+MAX_UPLOAD_MB = int(os.environ.get("MAX_UPLOAD_MB", "500"))
+app.config['MAX_CONTENT_LENGTH'] = MAX_UPLOAD_MB * 1024 * 1024
+
+
+@app.errorhandler(RequestEntityTooLarge)
+def upload_too_large(_error):
+    return jsonify({"error": f"File is too large. The limit is {MAX_UPLOAD_MB} MB."}), 413
 
 # --- CLEANUP LOGIC ---
 def cleanup_folder():
@@ -196,6 +208,9 @@ def predict():
     if 'file' not in request.files: return jsonify({"error": "No file"}), 400
 
     file = request.files['file']
+    ext = os.path.splitext(file.filename or "")[1].lower()
+    if ext not in ALLOWED_AUDIO:
+        return jsonify({"error": f"Unsupported audio type '{ext or 'none'}'. Allowed: {', '.join(sorted(ALLOWED_AUDIO))}"}), 415
     filename = secure_filename(file.filename)
     temp_path = os.path.join(AUDIO_UPLOAD_FOLDER, f"{uuid.uuid4()}_{filename}")
     
