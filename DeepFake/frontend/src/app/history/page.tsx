@@ -31,7 +31,7 @@ import withAuth from "@/lib/withAuth";
 function HistoryPage() {
   const { isLoading, getHistoryfromAPI, removeEntry } = useHistory();
   const [searchTerm, setSearchTerm] = useState("");
-  const [filterType, setFilterType] = useState<"all" | "deepfake" | "real">(
+  const [filterType, setFilterType] = useState<"all" | "deepfake" | "authentic">(
     "all",
   );
   const [sortBy, setSortBy] = useState<"date" | "filename" | "confidence">(
@@ -189,14 +189,14 @@ function HistoryPage() {
                       value={filterType}
                       onChange={(e) =>
                         setFilterType(
-                          e.target.value as "all" | "deepfake" | "real",
+                          e.target.value as "all" | "deepfake" | "authentic",
                         )
                       }
                       className="pl-10 pr-8 py-2 border border-gray-300 dark:border-gray-600 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500 dark:bg-gray-700 dark:text-white appearance-none"
                     >
                       <option value="all">All Results</option>
                       <option value="deepfake">Deepfakes</option>
-                      <option value="real">Real Videos</option>
+                      <option value="authentic">Real Videos</option>
                     </select>
                   </div>
                 </div>
