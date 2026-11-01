@@ -25,6 +25,8 @@ MODEL_PATH = "deepfake_model_resnet_lstm.pth"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 SEGMENT_DURATION = 4.0
 OVERLAP = 2.0
+BATCH_SIZE = 32       # windows per model call
+MAX_WINDOWS = 300     # about 10 minutes of audio; longer files are sampled evenly
 
 # Dedicated folder for audio uploads
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -163,6 +165,45 @@ def preprocess_chunk_with_metadata(y_chunk, sr, chunk_idx, start_time):
         print(f"Preprocessing error: {e}")
         return None, None
 
+# --- WINDOWING ---
+def window_starts(n_samples, chunk_samples, stride_samples):
+    """
+    Start positions (in samples) of the analysis windows.
+    - Empty audio: no windows.
+    - Shorter than one window: one window at 0 (it gets zero-padded).
+    - Otherwise every stride, plus one window aligned to the end, so the
+      last seconds of the clip are always analysed.
+    """
+    if n_samples <= 0:
+        return []
+    if n_samples <= chunk_samples:
+        return [0]
+    starts = list(range(0, n_samples - chunk_samples + 1, stride_samples))
+    tail = n_samples - chunk_samples
+    if starts[-1] != tail:
+        starts.append(tail)
+    return starts
+
+
+def cap_windows(starts, max_windows=MAX_WINDOWS):
+    """Keeps at most max_windows starts, spread evenly over the whole clip."""
+    if len(starts) <= max_windows:
+        return starts
+    picks = np.unique(np.linspace(0, len(starts) - 1, max_windows).round().astype(int))
+    return [starts[i] for i in picks]
+
+
+def predict_probs(tensors):
+    """Runs the model in batches of BATCH_SIZE and returns the fake probability per window."""
+    probs = []
+    with torch.no_grad():
+        for i in range(0, len(tensors), BATCH_SIZE):
+            batch = torch.cat(tensors[i:i + BATCH_SIZE], dim=0)
+            outputs = model(batch)
+            probs.append(torch.nn.functional.softmax(outputs, dim=1)[:, 1].cpu().numpy())
+    return np.concatenate(probs)
+
+
 # --- ANALYSIS HELPERS ---
 def detect_anomaly_patterns(probs, window_size=3):
     if len(probs) < window_size:
@@ -223,12 +264,18 @@ def predict():
         chunk_samples = int(SEGMENT_DURATION * sr)
         stride_samples = int((SEGMENT_DURATION - OVERLAP) * sr)
         
+        duration = len(y) / sr
+        all_starts = window_starts(len(y), chunk_samples, stride_samples)
+        if not all_starts:
+            return jsonify({"error": "The audio file contains no audio."}), 422
+        starts = cap_windows(all_starts)
+
         tensors = []
         meta_list = []
         
         # Processing Loop
         chunk_idx = 0
-        for start in range(0, len(y) - chunk_samples + 1, stride_samples):
+        for start in starts:
             chunk = y[start : start + chunk_samples]
             tensor, meta = preprocess_chunk_with_metadata(chunk, sr, chunk_idx, start/sr)
             if tensor is not None:
@@ -237,13 +284,11 @@ def predict():
                 chunk_idx += 1
 
         if not tensors:
-            return jsonify({"label": "real", "confidence": 0, "segments": []})
+            # No verdict: never report "real" when nothing could be analysed.
+            return jsonify({"error": "None of the audio could be analysed."}), 422
 
-        # Batch Inference
-        with torch.no_grad():
-            batch = torch.cat(tensors, dim=0)
-            outputs = model(batch)
-            probs = torch.nn.functional.softmax(outputs, dim=1)[:, 1].cpu().numpy()
+        # Batch Inference (in mini-batches to keep memory bounded)
+        probs = predict_probs(tensors)
 
         # Filter: Remove Silent/Noisy chunks
         active_indices = [i for i, m in enumerate(meta_list) if not m['is_silence'] and not m['is_noisy']]
@@ -285,7 +330,7 @@ def predict():
                     m = meta_list[i]
                     segments.append({
                         "start": round(float(m['start_time']), 2),
-                        "end": round(float(m['start_time'] + SEGMENT_DURATION), 2),
+                        "end": round(float(min(m['start_time'] + SEGMENT_DURATION, duration)), 2),
                         "confidence": round(float(probs[i]) * 100, 2),
                         "label": "fake"
                     })
@@ -293,7 +338,10 @@ def predict():
         return jsonify({
             "label": final_label,
             "confidence": round(float(conf), 2),
-            "segments": segments
+            "segments": segments,
+            "windows_analysed": len(tensors),
+            "windows_total": len(all_starts),
+            "capped": len(starts) < len(all_starts),
         })
 
     except Exception as e:
