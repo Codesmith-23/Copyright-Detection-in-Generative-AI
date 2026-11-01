@@ -385,9 +385,9 @@ def match_identity():
 @app.route("/register_identity", methods=["POST"])
 def register_identity():
     try:
-        data = request.get_json()
+        data = request.get_json(silent=True)
         required_fields = ["entity_id", "name", "type", "image"]
-        if not all(field in data for field in required_fields):
+        if not data or not all(field in data for field in required_fields):
             return jsonify({"error": f"Missing required fields: {required_fields}"}), 400
 
         entity_id = data["entity_id"]
@@ -413,6 +413,8 @@ def register_identity():
 
         from datetime import datetime
         timestamp = datetime.now().isoformat()
+        # The consent time recorded when the creator registered, if provided.
+        consent_date = data.get("consent_date") or timestamp
 
         try:
             with sqlite3.connect(DB_PATH) as conn:
@@ -421,7 +423,7 @@ def register_identity():
                     INSERT OR IGNORE INTO protected_entities
                     (entity_id, name, type, email, consent_agreement_date, created_at, is_active)
                     VALUES (?, ?, ?, ?, ?, ?, 1)
-                """, (entity_id, name, entity_type, email, timestamp, timestamp))
+                """, (entity_id, name, entity_type, email, consent_date, timestamp))
 
                 embedding_blob = pickle.dumps(embedding)
                 c.execute("""

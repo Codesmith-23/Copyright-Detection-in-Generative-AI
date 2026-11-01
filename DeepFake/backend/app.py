@@ -172,6 +172,19 @@ def init_db():
             FOREIGN KEY (user_id) REFERENCES users (id)
         )
     """)
+    # Which user registered which protected identity, with their consent record.
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS creator_registrations (
+            entity_id TEXT PRIMARY KEY,
+            owner_user_id INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            email TEXT NOT NULL,
+            type TEXT NOT NULL,
+            consent_at TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (owner_user_id) REFERENCES users (id)
+        )
+    """)
     conn.commit()
 
 init_db()
@@ -705,29 +718,66 @@ def delete_result(result_id):
 # CREATOR REGISTRATION ROUTES
 # ==========================================
 
+CREATOR_TYPES = {"creator", "celebrity", "brand_character"}
+ALLOWED_IMAGE = {'.jpg', '.jpeg', '.png', '.webp'}
+MAX_REFERENCE_IMAGES = 10
+
+
+def get_owned_creator(entity_id, user_id):
+    """Returns the registration if user_id owns entity_id, else None."""
+    c = get_db().cursor()
+    c.execute("""
+        SELECT entity_id, name, email, type, consent_at
+        FROM creator_registrations
+        WHERE entity_id = ? AND owner_user_id = ?
+    """, (entity_id, user_id))
+    row = c.fetchone()
+    if not row:
+        return None
+    return dict(zip(["entity_id", "name", "email", "type", "consent_at"], row))
+
+
+def fetch_identities():
+    """Returns the identity service's identities keyed by entity_id, or None on failure."""
+    response = requests.get("http://127.0.0.1:5002/list_identities", timeout=10)
+    if response.status_code != 200:
+        return None
+    return {c["entity_id"]: c for c in response.json().get("identities", [])}
+
+
 @app.route("/creators/register", methods=["POST"])
+@token_required
 def register_creator():
     try:
-        data = request.get_json()
+        data = request.get_json(silent=True)
         required_fields = ["name", "email", "type", "consent"]
         if not data or not all(k in data for k in required_fields):
             return jsonify({"error": f"Missing required fields: {required_fields}"}), 400
 
-        name = data["name"].strip()
-        email = data["email"].strip().lower()
+        name = str(data["name"]).strip()
+        email = str(data["email"]).strip().lower()
         creator_type = data["type"]
-        consent = data.get("consent", False)
+        consent = data.get("consent") is True
 
-        if not name or len(name) < 2:
+        if len(name) < 2:
             return jsonify({"error": "Name must be at least 2 characters"}), 400
         if '@' not in email or '.' not in email:
             return jsonify({"error": "Invalid email format"}), 400
-        if creator_type not in ["creator", "celebrity", "brand_character"]:
+        if creator_type not in CREATOR_TYPES:
             return jsonify({"error": "Invalid type. Must be: creator, celebrity, brand_character"}), 400
         if not consent:
             return jsonify({"error": "Consent to biometric data storage is required"}), 400
 
         entity_id = f"creator_{uuid.uuid4().hex[:8]}"
+        now = datetime.now().isoformat()
+
+        conn = get_db()
+        conn.execute("""
+            INSERT INTO creator_registrations
+            (entity_id, owner_user_id, name, email, type, consent_at, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (entity_id, request.current_user['user_id'], name, email, creator_type, now, now))
+        conn.commit()
 
         print(f"[CREATOR] Registering: {name} ({entity_id})")
 
@@ -744,28 +794,30 @@ def register_creator():
 
 
 @app.route("/creators/upload-reference", methods=["POST"])
+@token_required
 def upload_reference():
     try:
         entity_id = request.form.get("entity_id")
-        real_name = request.form.get(
-            "name",
-            entity_id.replace("creator_", "").replace("_", " ").title()
-        )
-
         if not entity_id:
             return jsonify({"error": "Missing entity_id"}), 400
-        if "files" not in request.files:
-            return jsonify({"error": "No files provided"}), 400
 
-        files = request.files.getlist("files")
-        if not files or len(files) == 0:
+        # Name, type and email come from the owner's registration, not the request.
+        creator = get_owned_creator(entity_id, request.current_user['user_id'])
+        if not creator:
+            return jsonify({"error": "Creator not found"}), 404
+
+        files = [f for f in request.files.getlist("files") if f.filename]
+        if not files:
             return jsonify({"error": "At least one file is required"}), 400
+        if len(files) > MAX_REFERENCE_IMAGES:
+            return jsonify({"error": f"Upload at most {MAX_REFERENCE_IMAGES} images"}), 400
 
         embeddings_stored = 0
         errors = []
 
         for file in files:
-            if file.filename == "":
+            if os.path.splitext(file.filename)[1].lower() not in ALLOWED_IMAGE:
+                errors.append(f"{file.filename}: unsupported image type (use jpg, png or webp)")
                 continue
             try:
                 file_data = file.read()
@@ -775,8 +827,10 @@ def upload_reference():
                     "http://127.0.0.1:5002/register_identity",
                     json={
                         "entity_id": entity_id,
-                        "name": real_name,
-                        "type": "creator",
+                        "name": creator["name"],
+                        "type": creator["type"],
+                        "email": creator["email"],
+                        "consent_date": creator["consent_at"],
                         "image": image_b64
                     },
                     timeout=30
@@ -816,75 +870,89 @@ def upload_reference():
 
 
 @app.route("/creators/profile/<entity_id>", methods=["GET"])
+@token_required
 def get_creator_profile(entity_id):
     try:
-        response = requests.get("http://127.0.0.1:5002/list_identities", timeout=10)
-        if response.status_code == 200:
-            identities = response.json().get("identities", [])
-            creator = next((c for c in identities if c["entity_id"] == entity_id), None)
-            if not creator:
-                return jsonify({"error": "Creator not found"}), 404
-            return jsonify({
-                "entity_id": creator["entity_id"],
-                "name": creator["name"],
-                "type": creator["type"],
-                "status": "active" if creator["is_active"] else "inactive",
-                "registered_references": creator.get("embedding_count", 0),
-                "created_at": creator["created_at"],
-                "protection_status": (
-                    "active"
-                    if creator["is_active"] and creator.get("embedding_count", 0) > 0
-                    else "pending"
-                )
-            }), 200
-        else:
+        creator = get_owned_creator(entity_id, request.current_user['user_id'])
+        if not creator:
+            return jsonify({"error": "Creator not found"}), 404
+
+        identities = fetch_identities()
+        if identities is None:
             return jsonify({"error": "Failed to fetch creator profile"}), 500
+
+        # No identity row yet means no reference image has been stored.
+        identity = identities.get(entity_id) or {}
+        is_active = bool(identity.get("is_active"))
+        references = identity.get("embedding_count", 0)
+        return jsonify({
+            "entity_id": entity_id,
+            "name": creator["name"],
+            "type": creator["type"],
+            "status": "active" if is_active else "inactive",
+            "registered_references": references,
+            "created_at": identity.get("created_at"),
+            "protection_status": "active" if is_active and references > 0 else "pending"
+        }), 200
     except Exception as e:
         print(f"[ERROR] Failed to get profile for {entity_id}: {e}")
         return jsonify({"error": str(e)}), 500
 
 
 @app.route("/creators/<entity_id>", methods=["DELETE"])
+@token_required
 def delete_creator(entity_id):
     try:
+        if not get_owned_creator(entity_id, request.current_user['user_id']):
+            return jsonify({"error": "Creator not found"}), 404
+
         response = requests.delete(
             f"http://127.0.0.1:5002/delete_identity/{entity_id}",
             timeout=10
         )
-        if response.status_code == 200:
-            return jsonify({
-                "success": True,
-                "message": f"Creator {entity_id} deleted successfully"
-            }), 200
-        else:
+        if response.status_code != 200:
             return jsonify({"error": "Failed to delete creator"}), 500
+
+        conn = get_db()
+        conn.execute("DELETE FROM creator_registrations WHERE entity_id = ?", (entity_id,))
+        conn.commit()
+        return jsonify({
+            "success": True,
+            "message": f"Creator {entity_id} deleted successfully"
+        }), 200
     except Exception as e:
         print(f"[ERROR] Failed to delete {entity_id}: {e}")
         return jsonify({"error": str(e)}), 500
 
 
 @app.route("/creators/list", methods=["GET"])
+@token_required
 def list_creators():
+    """Lists only the identities the current user registered."""
     try:
-        response = requests.get("http://127.0.0.1:5002/list_identities", timeout=10)
-        if response.status_code == 200:
-            data = response.json()
-            return jsonify({
-                "total": data.get("total", 0),
-                "creators": [
-                    {
-                        "entity_id": c["entity_id"],
-                        "name": c["name"],
-                        "type": c["type"],
-                        "status": "active" if c["is_active"] else "inactive",
-                        "references": c.get("embedding_count", 0),
-                        "created_at": c["created_at"]
-                    }
-                    for c in data.get("identities", [])
-                ]
-            }), 200
-        else:
+        c = get_db().cursor()
+        c.execute("""
+            SELECT entity_id, name, type, created_at FROM creator_registrations
+            WHERE owner_user_id = ? ORDER BY created_at DESC
+        """, (request.current_user['user_id'],))
+        owned = c.fetchall()
+
+        identities = fetch_identities()
+        if identities is None:
             return jsonify({"error": "Failed to list creators"}), 500
+
+        creators = []
+        for entity_id, name, creator_type, created_at in owned:
+            identity = identities.get(entity_id) or {}
+            creators.append({
+                "entity_id": entity_id,
+                "name": name,
+                "type": creator_type,
+                "status": "active" if identity.get("is_active") else "inactive",
+                "references": identity.get("embedding_count", 0),
+                "created_at": created_at
+            })
+        return jsonify({"total": len(creators), "creators": creators}), 200
     except Exception as e:
         print(f"[ERROR] Failed to list creators: {e}")
         return jsonify({"error": str(e)}), 500

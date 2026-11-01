@@ -14,8 +14,15 @@ import {
 } from "lucide-react";
 import Button from "@/components/ui/Button";
 import { authService } from "@/lib/auth";
+import withAuth from "@/lib/withAuth";
 
 const BACKEND_URL = "http://127.0.0.1:5000";
+
+// Creator routes require the logged-in user's token.
+const authHeaders = (): Record<string, string> => {
+  const token = authService.getToken();
+  return token ? { Authorization: `Bearer ${token}` } : {};
+};
 
 interface FormState {
   name: string;
@@ -31,7 +38,7 @@ interface UploadState {
   uploadMessage: string;
 }
 
-export default function CreatorRegistrationPage() {
+function CreatorRegistrationPage() {
   const router = useRouter();
 
   // Step 1: Registration Form
@@ -112,7 +119,7 @@ export default function CreatorRegistrationPage() {
     try {
       const response = await fetch(`${BACKEND_URL}/creators/register`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...authHeaders() },
         body: JSON.stringify({
           name: formData.name,
           email: formData.email,
@@ -165,9 +172,6 @@ export default function CreatorRegistrationPage() {
     try {
       const formDataToSend = new FormData(); // Renamed to avoid conflict with state 'formData'
       formDataToSend.append("entity_id", uploadData.entityId);
-      
-      // ADD THIS LINE RIGHT HERE:
-      formDataToSend.append("name", formData.name); 
 
       for (let i = 0; i < uploadData.files.length; i++) {
         formDataToSend.append("files", uploadData.files[i]);
@@ -175,6 +179,7 @@ export default function CreatorRegistrationPage() {
 
       const response = await fetch(`${BACKEND_URL}/creators/upload-reference`, {
         method: "POST",
+        headers: authHeaders(),
         body: formDataToSend,
       });
 
@@ -205,21 +210,26 @@ export default function CreatorRegistrationPage() {
   // STEP 3: VERIFICATION
   // ============================================================================
 
-  const handleStartVerification = () => {
+  // Checks with the backend that reference embeddings were stored and the
+  // identity is active for matching.
+  const handleStartVerification = async () => {
     setVerificationStatus("processing");
-
-    // Mock verification process (simulates backend verification)
-    setTimeout(() => {
-      // Randomly succeed or show as processing for demo
-      const success = Math.random() > 0.1; // 90% success rate for demo
-      if (success) {
+    try {
+      const response = await fetch(
+        `${BACKEND_URL}/creators/profile/${encodeURIComponent(uploadData.entityId)}`,
+        { headers: authHeaders() },
+      );
+      const data = response.ok ? await response.json() : null;
+      if (data?.protection_status === "active") {
         setVerificationStatus("verified");
         // Redirect to detect page after successful verification
         setTimeout(() => router.push("/detect"), 3000);
       } else {
         setVerificationStatus("failed");
       }
-    }, 3000); // 3 second mock verification
+    } catch {
+      setVerificationStatus("failed");
+    }
   };
 
   // ============================================================================
@@ -642,3 +652,5 @@ export default function CreatorRegistrationPage() {
     </div>
   );
 }
+
+export default withAuth(CreatorRegistrationPage);
