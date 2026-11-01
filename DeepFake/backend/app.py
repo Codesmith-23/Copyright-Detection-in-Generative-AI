@@ -19,6 +19,7 @@ import threading
 import concurrent.futures
 from functools import wraps
 from werkzeug.security import generate_password_hash, check_password_hash
+from werkzeug.exceptions import RequestEntityTooLarge
 from tensorflow.keras.models import load_model
 from flask import Flask, request, jsonify, send_from_directory
 from datetime import datetime, timedelta
@@ -79,6 +80,15 @@ app.config['JWT_EXPIRATION_HOURS'] = 24
 
 ALLOWED_AUDIO = {'.mp3', '.wav', '.flac', '.m4a'}
 ALLOWED_VIDEO = {'.mp4', '.avi', '.mov', '.mkv'}
+
+# Largest accepted upload, in MB. Matches the 500 MB limit in the frontend's upload box.
+MAX_UPLOAD_MB = int(os.environ.get("MAX_UPLOAD_MB", "500"))
+app.config['MAX_CONTENT_LENGTH'] = MAX_UPLOAD_MB * 1024 * 1024
+
+
+@app.errorhandler(RequestEntityTooLarge)
+def upload_too_large(_error):
+    return jsonify({"error": f"File is too large. The limit is {MAX_UPLOAD_MB} MB."}), 413
 
 # --- CONFIGURATION ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -393,6 +403,9 @@ def predict_media():
         file = request.files["file"]
         filename = file.filename
         ext = os.path.splitext(filename)[1].lower()
+        if ext not in ALLOWED_AUDIO and ext not in ALLOWED_VIDEO:
+            allowed = ", ".join(sorted(ALLOWED_VIDEO | ALLOWED_AUDIO))
+            return jsonify({"error": f"Unsupported file type '{ext or 'none'}'. Allowed: {allowed}"}), 415
         user_id = request.current_user['user_id']
         analysisID = str(uuid.uuid4())
 
@@ -661,6 +674,8 @@ def predict_media():
 
             return jsonify(response_data)
 
+    except RequestEntityTooLarge:
+        raise  # handled by the JSON 413 handler below
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
@@ -864,6 +879,8 @@ def upload_reference():
             "errors": errors if errors else None
         }), 200
 
+    except RequestEntityTooLarge:
+        raise  # handled by the JSON 413 handler below
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
