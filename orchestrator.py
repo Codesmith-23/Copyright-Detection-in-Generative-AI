@@ -5,20 +5,54 @@ import signal
 import sys
 import threading
 import shutil
+import json
 
 # ==============================================================================
 #  CONFIGURATION
 # ==============================================================================
-AUDIO_PYTHON = r"C:\...\Voice Deepfake\.venv\Scripts\python.exe"
-VIDEO_PYTHON = r"C:\...\DeepFake\backend\.venv\Scripts\python.exe"
+# Paths are worked out from where this file lives, so nothing here needs
+# editing after a clone or a pull. Each service uses the Python from its own
+# virtual environment (.venv or venv inside its folder) when one exists,
+# otherwise the Python running this script.
+#
+# To override anything on your machine only, create orchestrator_local.json
+# next to this file (it is git-ignored), e.g.:
+#   {"VIDEO_PYTHON": "C:\\path\\to\\python.exe", "FRONTEND_MODE": "dev"}
+# Keys: AUDIO_PYTHON, VIDEO_PYTHON, AUDIO_DIR, VIDEO_DIR, FRONTEND_DIR, FRONTEND_MODE
+ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
+LOCAL_CONFIG_FILE = os.path.join(ROOT_DIR, "orchestrator_local.json")
 
-AUDIO_DIR = r"C:\...\Voice Deepfake"
-VIDEO_DIR = r"C:\...\Deepfake\backend"
-FRONTEND_DIR = r"C:\...\Deepfake\frontend"
+
+def load_local_config():
+    if not os.path.exists(LOCAL_CONFIG_FILE):
+        return {}
+    with open(LOCAL_CONFIG_FILE, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def find_venv_python(service_dir):
+    """Returns the Python inside service_dir/.venv or service_dir/venv, else this Python."""
+    for venv in (".venv", "venv"):
+        for exe in (os.path.join("Scripts", "python.exe"), os.path.join("bin", "python")):
+            candidate = os.path.join(service_dir, venv, exe)
+            if os.path.exists(candidate):
+                return candidate
+    return sys.executable
+
+
+local_config = load_local_config()
+
+AUDIO_DIR = local_config.get("AUDIO_DIR") or os.path.join(ROOT_DIR, "Voice Deepfake")
+VIDEO_DIR = local_config.get("VIDEO_DIR") or os.path.join(ROOT_DIR, "DeepFake", "backend")
+FRONTEND_DIR = local_config.get("FRONTEND_DIR") or os.path.join(ROOT_DIR, "DeepFake", "frontend")
+
+AUDIO_PYTHON = local_config.get("AUDIO_PYTHON") or find_venv_python(AUDIO_DIR)
+VIDEO_PYTHON = local_config.get("VIDEO_PYTHON") or find_venv_python(VIDEO_DIR)
+
+# "dev"  = hot reload, red overlays
+# "prod" = clean UI, no error screens <- use for demo
+FRONTEND_MODE = local_config.get("FRONTEND_MODE", "prod")
 # ==============================================================================
-
-# FRONTEND_MODE = "dev"   # hot reload, red overlays
-FRONTEND_MODE = "prod"  # clean UI, no error screens ← use for demo
 
 # Global list to track processes for cleanup
 processes = []
