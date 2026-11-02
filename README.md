@@ -1,4 +1,4 @@
-# 📌 Copyright Detection in Generative A
+# 📌 Copyright Detection in Generative AI
 
 A comprehensive deep learning system designed to detect synthetic media manipulation in both **Video** and **Audio**. The system uses a **microservices architecture** with a React frontend and two specialized Flask backends.
 
